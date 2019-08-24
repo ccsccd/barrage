@@ -11,7 +11,8 @@ func main() {
 		//主页
 		router.StaticFile("/", "./static/screen.html")
 		//弹幕系统
-		router.GET("/ws", barrage.WsHandler)
+		hub := barrage.Hub{Connections: map[*barrage.WsConnection]bool{}}
+		router.GET("/ws", hub.WsHandler)
 		//随便抽一个幸运id，快，无参数
 		router.GET("/lot", barrage.LotteryEnter)
 		//随便抽一个说出口令的幸运id，慢，请求参数word="口令"

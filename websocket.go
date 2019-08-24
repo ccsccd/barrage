@@ -21,8 +21,12 @@ type wsMessage struct {
 	data        []byte
 }
 
+type Hub struct {
+	Connections map[*WsConnection]bool
+}
+
 // 客户端连接
-type wsConnection struct {
+type WsConnection struct {
 	wsSocket *websocket.Conn //　底层websocket
 	inChan   chan *wsMessage // 读队列
 	outChan  chan *wsMessage // 写队列
@@ -32,7 +36,7 @@ type wsConnection struct {
 	closeChan chan byte //关闭通知
 }
 
-func (wsConn *wsConnection) wsReadLoop() {
+func (wsConn *WsConnection) wsReadLoop(hub *Hub) {
 	for {
 		//读一个message
 		msgType, data, err := wsConn.wsSocket.ReadMessage()
@@ -51,11 +55,11 @@ func (wsConn *wsConnection) wsReadLoop() {
 		}
 	}
 error:
-	wsConn.wsClose()
+	wsConn.wsClose(hub)
 closed:
 }
 
-func (wsConn *wsConnection) wsWriteLoop() {
+func (wsConn *WsConnection) wsWriteLoop(hub *Hub) {
 	for {
 		select {
 		//取一个应答
@@ -70,11 +74,11 @@ func (wsConn *wsConnection) wsWriteLoop() {
 		}
 	}
 error:
-	wsConn.wsClose()
+	wsConn.wsClose(hub)
 closed:
 }
 
-func (wsConn *wsConnection) procLoop() {
+func (wsConn *WsConnection) procLoop(hub *Hub) {
 	go func() {
 		for {
 			msg, err := wsConn.wsRead()
@@ -87,36 +91,41 @@ func (wsConn *wsConnection) procLoop() {
 			barrage.UserId = wsConn.wsSocket.RemoteAddr().String()
 			SendToMQ(obejctToJson(barrage))
 
-			err = wsConn.wsWrite(msg.messageType, obejctToJson(Filter(barrage)))
-			if err != nil {
-				fmt.Println("write fail")
-				break
+			for c := range hub.Connections {
+				err = c.wsWrite(msg.messageType, obejctToJson(Filter(barrage)))
+				if err != nil {
+					fmt.Println("write fail")
+					break
+				}
 			}
 		}
 	}()
 }
 
-func WsHandler(c *gin.Context) {
+func (hub Hub) WsHandler(c *gin.Context) {
 	wsSocket, err := wsUpgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		return
 	}
-	wsConn := &wsConnection{
+	wsConn := &WsConnection{
 		wsSocket:  wsSocket,
 		inChan:    make(chan *wsMessage, 1000),
 		outChan:   make(chan *wsMessage, 1000),
 		closeChan: make(chan byte),
 		isClosed:  false,
 	}
+
+	hub.Connections[wsConn] = true
+
 	//处理器
-	go wsConn.procLoop()
+	go wsConn.procLoop(&hub)
 	//读协程
-	go wsConn.wsReadLoop()
+	go wsConn.wsReadLoop(&hub)
 	//写协程
-	go wsConn.wsWriteLoop()
+	go wsConn.wsWriteLoop(&hub)
 }
 
-func (wsConn *wsConnection) wsRead() (*wsMessage, error) {
+func (wsConn *WsConnection) wsRead() (*wsMessage, error) {
 	select {
 	case msg := <-wsConn.inChan:
 		return msg, nil
@@ -125,7 +134,7 @@ func (wsConn *wsConnection) wsRead() (*wsMessage, error) {
 	return nil, fmt.Errorf("websocket closed")
 }
 
-func (wsConn *wsConnection) wsWrite(messageType int, data []byte) error {
+func (wsConn *WsConnection) wsWrite(messageType int, data []byte) error {
 	select {
 	case wsConn.outChan <- &wsMessage{messageType, data}:
 	case <-wsConn.closeChan:
@@ -134,7 +143,8 @@ func (wsConn *wsConnection) wsWrite(messageType int, data []byte) error {
 	return nil
 }
 
-func (wsConn *wsConnection) wsClose() {
+func (wsConn *WsConnection) wsClose(hub *Hub) {
+	delete(hub.Connections, wsConn)
 	_ = wsConn.wsSocket.Close()
 
 	wsConn.mutex.Lock()
